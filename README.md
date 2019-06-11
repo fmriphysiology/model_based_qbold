@@ -4,7 +4,7 @@ MATLAB scripts used to generate and analyse simulated quantitative BOLD data, an
 
 ASE_Simulation:
 
-These scripts are used to generate and analyse simulated ASE qBOLD data from a single model voxel. qASE.m creates a .mat file of simulated ASE data (an example is included as data_qASE_example.mat), which can be analysed in a 2D grid search using gridSearchBayesian.m. The implementation of the qBOLD model is in qASE_model, it uses the static dephasing regime in the tissue compartment (Yablonskiy & Haacke, 1994, and He & Yablonskiy, 2007), the motional narrowing model in the blood compartment (Berman & Pike, 2017), and an frequency-offset static extracellular compartment (Simon et al., 2016). 
+These scripts are used to generate and analyse simulated ASE qBOLD data from a single model voxel. Simulat_qASE.m creates a .mat file of simulated ASE data (an example is included as data_qASE_example.mat), which can be analysed in a 2D grid search using gridSearchBayesian.m. The implementation of the qBOLD model is in qASE_model.m, it uses the static dephasing regime in the tissue compartment (Yablonskiy & Haacke, 1994, and He & Yablonskiy, 2007), the motional narrowing model in the blood compartment (Berman & Pike, 2017). 
 
 Fabber_Analysis:
 
