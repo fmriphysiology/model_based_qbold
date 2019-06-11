@@ -1,7 +1,7 @@
-function [S,PARAMS] = qASE_model(TAU,TE,PARAMS,NODW)
+function [S,PARAMS] = qASE_model(TAU,TE,PARAMS)
     % Calculates ASE signal from a single voxel. Usage:
     %
-    %       [S,PARAMS] = qASE_model(TAU,TE,PARAMS,NODW)
+    %       [S,PARAMS] = qASE_model(TAU,TE,PARAMS)
     %
     % Input:  TAU    - A vector of tau values (refocussing pulse offsets)
     %                  in seconds.
@@ -12,95 +12,191 @@ function [S,PARAMS] = qASE_model(TAU,TE,PARAMS,NODW)
     %                  optionally returned as an output, with extra values
     %                  (such as dw) which are calculated within, returned
     %                  as the output.
-    %         NODW   - [OPTIONAL] A boolean, to be used when inferring on
-    %                  R2', which changes the order in which things are
-    %                  calculated.
     %
     % Output: S      - A vector of signal values of same size as T.
     %         PARAMS - [OPTIONAL] The modified parameter structure.
     %
-    % For use in qASE.m, gridSearchBayes.m, Uses the method described by
-    % Yablonskiy & Haacke (1994), and He & Yablonskiy (2007), with additional
+    % For use in qASE.m, gridSearchBayesian.m, etc. uses the method described
+    % by Yablonskiy & Haacke (1994), and He & Yablonskiy (2007), with additional
     % components as described by Berman & Pike (2017) and Simon et al. (2016)
     %
     % 
-    %       Copyright (C) University of Oxford, 2016-2018
+    %       Copyright (C) University of Oxford, 2016-2019
     %
     % 
     % Created by MT Cherukara, 16 May 2016
     %
     % CHANGELOG:
     %
-    % 2018-09-07. Various changes.
+    % 2019-05-27 (MTC). Added alternative models for calculating intravascular
+    %       signal, especially the 'powder model' (Sukstanskii, 2001), and the
+    %       'linear' model (Simon et al., 2016). Removed other compartments that
+    %       aren't included in the paper.
+    %
+    % 2018-10-30 (MTC). Added in a parameter for short-tau DBV offset (referred
+    %       to in my notes as beta), and for linear R2' scaling factor SR, and
+    %       for [dHb] exponent beta (a.k.a. gamma from Ogawa)
+    %
+    % 2018-10-23 (MTC). Re-wrote the Asymptotic model such that it depends on
+    %       R2', rather than dw, in its actual calculations. This makes no
+    %       actual difference to the calculation, but makes it more intiutive
+    %       when seeing what R2' actually does. This will also allow for
+    %       arbitrary scaling of R2', as part of adapting the model to suit
+    %       simulated data.
+    %
+    % 2018-10-10 (MTC). Added the option to specify which model to use in the
+    %       PARAMS structure, so that one doesn't have to keep coming into this
+    %       code and commenting section in and out. Also added an option to
+    %       include the T1 (steady-state-magnetization) contribution, and 
+    %       whether to include T2 effects.
+    %
+    % 2018-10-01 (MTC). Added the option for calculating dw as a function of dHb
+    %       concentration, instead of using OEF and Hct. Requires a scaling
+    %       parameter kappa (0.03), and an assumtpion of [Hb] and/or Hct.
+    %
+    % 2018-09-13 (MTC). Condensing the various compartment functions into the
+    %       one script, and bringing nomenclature into line with fmriphysiology
+    %       github.
+    %
+    % 2018-05-16 (MTC). Added the T1-based compartment weightings
+    %
+    % 2018-01-12 (MTC). R2_blood and R2_blood_star were the wrong way
+    %       around. Now we have fixed that.
+    %
+    % 2017-10-10 (MTC). Added the option to supply a vector of TE values
+    %       outside the PARAMS struct, and made changes to the called model
+    %       functions MTC_ASE_tissue.m, MTC_ASE_extra.m, MTC_ASE_blood.m,
+    %       in order to allow for inference on data with any arbitrary set
+    %       of TE-TAU pairs.
+    %
+    % 2017-08-07 (MTC). Added a control in the form of PARAMS.noDW to  
+    %       change the way things are done when we're trying to infer on 
+    %       R2'. Added PARAMS as an optional output. 
+    %       
+    % 2017-07-10 (MTC). Commented out the PARAMS.dw recalculation in order
+    %       to use this for the R2' and zeta estimation (alongside
+    %       MTC_qASE_model_long.m). This should be put back to normal if
+    %       using this for any other grid-search (e.g. the classic OEF-DBV)
+    %
+    % 2016-05-27 (MTC). Updated the way the compartments were summed up.
    
     
-% UPDATE PARAMETERS:
-
-if ~exist('NODW','var')
-    NODW = 0;
+%% Check Parameters
+% Check whether recently added parameters (e.g. incIV and incT2) are specified
+% or not, if not, add them in 
+if ~isfield(PARAMS,'incIV')
+    PARAMS.incIV = 1;   % included by default
 end
 
-% characteristic frequency - this will not be calculated if doing R2'-DBV inference
-if NODW
-    % if we are inferring on R2', we want to change the order we do things
-    % in slightly:
-    PARAMS.dw = PARAMS.R2p ./ PARAMS.zeta;
-    PARAMS.OEF = PARAMS.dw ./ ( (4/3)*pi*PARAMS.gam*PARAMS.dChi*PARAMS.Hct*PARAMS.B0 );
+if ~isfield(PARAMS,'incT2')
+    PARAMS.incT2 = 1;   % included by default
+end
+
+if ~isfield(PARAMS,'incT1')
+    PARAMS.incT1 = 1;   % included by default
+end
     
-else
-    % otherwise, proceed as normal and calculate dw:
-    PARAMS.dw   = (4/3)*pi*PARAMS.gam*PARAMS.dChi*PARAMS.Hct*PARAMS.OEF*PARAMS.B0;    
-end
+%% Recalculate dw (or OEF) depending on what is being used to generate the contrast
 
-% spin densities
-nt = 0.723;
-ne = 0.070;
-nb = 0.723;    
+ctr = lower(PARAMS.contr);
+
+switch ctr
+    
+    case 'oef'
+        PARAMS.dw   = (4/3)*pi*PARAMS.gam*PARAMS.B0*PARAMS.dChi*PARAMS.Hct*PARAMS.OEF;
+        PARAMS.R2p  = PARAMS.dw .* PARAMS.zeta;
+        
+    case 'r2p'
+        PARAMS.dw = PARAMS.R2p ./ PARAMS.zeta;
+        PARAMS.OEF = PARAMS.dw ./ ( (4/3)*pi*PARAMS.gam*PARAMS.dChi*PARAMS.Hct*PARAMS.B0 );
+        
+    otherwise
+        warning('No contrast source specified, using OEF');
+        PARAMS.dw   = (4/3)*pi*PARAMS.gam*PARAMS.B0*PARAMS.dChi*PARAMS.Hct*PARAMS.OEF; 
+        PARAMS.R2p  = PARAMS.dw .* PARAMS.zeta;
+    
+end % switch ctr
+
+
+%% Calculate important parameters
 
 % relaxation rate constant of blood
 PARAMS.R2b  =  4.5 + 16.4*PARAMS.Hct + (165.2*PARAMS.Hct + 55.7)*PARAMS.OEF^2;
 PARAMS.R2bp = 10.2 -  1.5*PARAMS.Hct + (136.9*PARAMS.Hct - 13.9)*PARAMS.OEF^2;
 
-% calculate compartment steady-state magnetization
-m_tis = calcMagnetization(TAU,TE,PARAMS.TR,PARAMS.T1t,1./PARAMS.R2t,PARAMS.TI);
-m_bld = calcMagnetization(TAU,TE,PARAMS.TR,PARAMS.T1b,1./PARAMS.R2b,PARAMS.TI);
-m_csf = calcMagnetization(TAU,TE,PARAMS.TR,PARAMS.T1e,1./PARAMS.R2e,PARAMS.TI);
+% compartment weightings
+if PARAMS.incT1
+    
+    % If we're including T1, we definitely need to include T2 as well
+    PARAMS.incT2 = 1;
+    
+    % spin densities
+    nb = 0.775;    
+    
+    % calculate compartment steady-state magnetization
+    m_bld = calcMagnetization(TAU,TE,PARAMS.TR,PARAMS.T1b,1./PARAMS.R2b,PARAMS.TI);
+    
+    % pull out parameters
+    Vb = PARAMS.zeta;
+    
+    % calculate compartment weightings
+    w_bld = m_bld.*nb.*Vb;
+    w_tis = 1 - w_bld;
+    
+else
+    
+    % Extract compartment weightings
+    w_bld = PARAMS.zeta;
+    w_tis = 1 - w_bld;
+    
+end % if PARAMS.incT1 ... else ...
 
-% pull out parameters
-Ve = PARAMS.lam0;
-Vb = PARAMS.zeta;
 
-% calculate compartment weightings
-w_csf = (ne.*m_csf.*Ve) ./ ( (nt.*m_tis) + (ne.*m_csf.*Ve) - (nt.*m_tis.*Ve) );
-w_bld = m_bld.*nb.*(1-w_csf).*Vb;
-w_tis = 1 - (w_csf + w_bld);
+%% Calculate the model
 
-% CALCULATE MODEL:
-S_tis = w_tis.*calcTissueCompartment(TAU,TE,PARAMS);
-S_csf = w_csf.*calcExtraCompartment(TAU,TE,PARAMS);
-S_bld = w_bld.*calcBloodCompartment(TAU,TE,PARAMS);
+mdl = lower(PARAMS.model);
 
-% add it all together:
-S = PARAMS.S0.*(S_tis + S_csf + S_bld);
+% Tissue Compartment - based on PARAMS.model choice
+switch mdl
+    
+    case 'full'
+        S_tis = calcTissueCompartment(TAU,TE,PARAMS);
+    case 'asymp'
+        S_tis = calcTissueAsymp(TAU,TE,PARAMS);
+    otherwise
+        warning('No model specified, using Asymptotic qBOLD');
+        S_tis = calcTissueAsymp(TAU,TE,PARAMS);
+        
+end % switch mdl
 
-end
+% Other compartments
+if PARAMS.incIV
+    
+    % Include and weight the blood compartments
+    S_bld = w_bld.*calcBloodCompartment(TAU,TE,PARAMS);
+%     S_bld = w_bld.*calcBloodPowder(TAU,TE,PARAMS);
+
+    
+    % add it all together:
+    S = PARAMS.S0.*( (w_tis.*S_tis) + S_bld);
+else
+    
+    S = PARAMS.S0.*S_tis;
+    
+end % if PARAMS.incIV
+      
+
+
+end % MAIN
 
 
 %% calcMagnetization function
 function M = calcMagnetization(tau,TE,TR,T1,T2,TI)
     % Calculate steady-state magnetization in an ASE sequence
 
-    % compute exponents
-    expT2 = (TE - tau)./T2;
-
-    % compute terms
-    terme = 1 + (2.*exp(expT2));
-    termf = (2 - exp(-(TR - TI)./T1)).*exp(-TI./T1);
-    termt = exp(-expT2);
-
     % put it all together
-    M = ( 1 - (terme.*termf) ) .* termt;
-    
+    M = 1 - ( 2 - exp(-(TR-TI)./T1)) .* exp(-TI/T1);
+
 end
 
 
@@ -112,7 +208,6 @@ function ST = calcTissueCompartment(TAU,TE,PARAMS)
     % pull out constants
     dw   = PARAMS.dw;
     zeta = PARAMS.zeta;
-    R2t  = PARAMS.R2t;
 
     % check whether one TE, or a vector, is supplied
     if length(TE) ~= length(TAU)
@@ -130,8 +225,14 @@ function ST = calcTissueCompartment(TAU,TE,PARAMS)
 
     end
 
-    ST = exp(-zeta.*fint./3) .* exp(-TE.*R2t);
-end
+    ST = exp(-zeta.*fint./3);
+    
+    % add T2 effect
+    if PARAMS.incT2
+        ST = ST .* exp(-TE.*PARAMS.R2t);
+    end
+    
+end % function ST = calcTissueCompartment(TAU,TE,PARAMS)
 
 
 %% calcBloodCompartment function
@@ -144,13 +245,13 @@ function SB = calcBloodCompartment(TAU,TE,PARAMS)
     Hct = PARAMS.Hct;
     OEF = PARAMS.OEF;
     B0  = PARAMS.B0;
-    R2b = PARAMS.R2b;
+    Dx0 = PARAMS.dChi;
 
     % assign constants
     td = 0.0045067;     % diffusion time
 
     % calculate parameters
-    dChi = (((-0.736 + (0.264*OEF) )*Hct) + (0.722 * (1-Hct)))*1e-6;
+    dChi = Dx0.*OEF + 0.14e-6;
     G0   = (4/45)*Hct*(1-Hct)*((dChi*B0)^2);
     kk   = 0.5*(gam^2)*G0*(td^2);
 
@@ -161,31 +262,79 @@ function SB = calcBloodCompartment(TAU,TE,PARAMS)
     end
 
     % calculate model
-    S  = exp(-kk.*( (TE./td) + sqrt(0.25 + (TE./td)) + 1.5 - ...
+    SB  = exp(-kk.*( (TE./td) + sqrt(0.25 + (TE./td)) + 1.5 - ...
                     (2.*sqrt( 0.25 + ( ((TE + TAU).^2) ./ td ) ) ) - ...
                     (2.*sqrt( 0.25 + ( ((TE - TAU).^2) ./ td ) ) ) ) );
 
-    SB = S.*exp(-R2b.*TE);
+    % add T2 effect
+    if PARAMS.incT2
+        SB = SB.*exp(-PARAMS.R2b.*TE);
+    end
+    
+end % function SB = calcBloodCompartment(TAU,TE,PARAMS)
 
-end
+
+%% calcBloodPowder function
+function SB = calcBloodPowder(TAU,TE,PARAMS)
+    % Calculate intravascular contribution to ASE qBOLD signal using the powder
+    % model (summarized in Yablonskiy, 2013).
+    
+    % pull out parameters
+    dw0 = 1.5*PARAMS.dw;
+    eta = sqrt((2.*dw0.*abs(TAU))./pi);
+    
+    SI = exp(1i.*dw0.*(TAU)./3) .* ( (fresnelc(eta) - 1i.*fresnels(eta)) ./eta);
+    
+    SB = abs(SI);
+    
+    % add T2 effect
+    if PARAMS.incT2
+        SB = SB.*exp(-PARAMS.R2b.*TE);
+    end
+    
+end % function SB = calcBloodPowder(TAU,TE,PARAMS)
 
 
-%% calcExtraCompartment function
-function SE = calcExtraCompartment(TAU,TE,PARAMS)
-    % Calculate the extracellular (CSF) contribution to ASE qBOLD signal using
-    % the model given in Simon et al., 2016
-
+%% calcTissueAsymp function
+function ST = calcTissueAsymp(TAU,TE,PARAMS)
+    % Calculate the tissue contribution to ASE qBOLD signal using the asymptotic
+    % version of the Yablonskiy (1994) static dephasing model
+    
     % pull out constants
-    R2e  = PARAMS.R2e;
-    df   = PARAMS.dF;
-
-    % check whether one TE, or a vector, is supplied
-    if length(TE) ~= length(TAU)
-        TE(2:length(TAU)) = TE(1);
+    dw   = PARAMS.dw;
+    R2p  = PARAMS.R2p;
+    zeta = PARAMS.zeta;
+    
+    % define the regime boundary
+    if PARAMS.tc_man
+        tc = PARAMS.tc_val;
+    else
+        tc = 1.76/dw;
     end
 
-    % calculate signal
-    SE = exp( -R2e.*TE) .* exp(- 2i.*pi.*df.*abs(TAU));
-    SE = real(SE);
+    % pre-allocate
+    ST = zeros(1,length(TAU)); 
     
-end
+    % loop through tau values
+    for ii = 1:length(TAU)
+
+        if abs(TAU(ii)) < tc
+            % short tau regime
+            ST(ii) = exp(-(0.3*(R2p.*TAU(ii)).^2)./(zeta));
+
+        else
+            % long tau regime
+            ST(ii) = exp((zeta)-(R2p*abs(TAU(ii))));
+
+        end
+    end
+    
+    % add T2 effect
+    if PARAMS.incT2
+        ST = ST .* exp(-PARAMS.R2t.*TE);
+    end
+    
+end % function ST = calcTissueAsymp(TAU,TE,PARAMS)
+
+
+

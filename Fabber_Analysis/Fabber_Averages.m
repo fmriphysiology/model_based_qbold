@@ -27,6 +27,7 @@ function Fabber_Averages(data_dir)
 
 
 %% Initial
+close all;
 
 % Hardcoded parameters
 nsubs = 7;          % number of subjects
