@@ -35,7 +35,7 @@ delta_tau =  0.004;
 end_tau   =  0.064;
 
 % Model constants
-Hct = 0.34;             % hct ratio in small vessels
+Hct = 0.40;             % hct ratio in small vessels
 dChi0 = 0.264*10^-6;    % ppm, sus difference between fully oxy & deoxy rbc's
 gamma = 2.675*10^4;     % rads/(secs.Gauss) gyromagnetic ratio
 B0 = 3*10^4;            % Gauss, Field strength
